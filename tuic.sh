@@ -1,189 +1,88 @@
 #!/bin/bash
+export LC_ALL=C
+export UUID=${UUID:-'39e8b439-06be-4783-ad52-6357fc5e8743'}         
+export NEZHA_SERVER=${NEZHA_SERVER:-''}             
+export NEZHA_PORT=${NEZHA_PORT:-'5555'}            
+export NEZHA_KEY=${NEZHA_KEY:-''}
+export PASSWORD=${PASSWORD:-'admin'} 
+export PORT=${PORT:-'0000'}  
+USERNAME=$(whoami)
+HOSTNAME=$(hostname)
 
-# Function to print characters with delay
-print_with_delay() {
-    text="$1"
-    delay="$2"
-    for ((i=0; i<${#text}; i++)); do
-        echo -n "${text:$i:1}"
-        sleep $delay
+[[ "$HOSTNAME" == "s1.ct8.pl" ]] && WORKDIR="domains/${USERNAME}.ct8.pl/logs" || WORKDIR="domains/${USERNAME}.serv00.net/logs"
+[ -d "$WORKDIR" ] || (mkdir -p "$WORKDIR" && chmod 777 "$WORKDIR" && cd "$WORKDIR")
+bash -c 'ps aux | grep $(whoami) | grep -v "sshd\|bash\|grep" | awk "{print \$2}" | xargs -r kill -9 >/dev/null 2>&1' >/dev/null 2>&1
+# devil binexec on > /dev/null 2>&1
+
+# Download Dependency Files
+clear
+echo -e "\e[1;35m正在安装中,请稍等...\e[0m"
+ARCH=$(uname -m) && DOWNLOAD_DIR="." && mkdir -p "$DOWNLOAD_DIR" && FILE_INFO=()
+if [ "$ARCH" == "arm" ] || [ "$ARCH" == "arm64" ] || [ "$ARCH" == "aarch64" ]; then
+    FILE_INFO=("https://github.com/etjec4/tuic/releases/download/tuic-server-1.0.0/tuic-server-1.0.0-x86_64-unknown-freebsd.sha256sum web" "https://github.com/eooce/test/releases/download/ARM/swith npm")
+elif [ "$ARCH" == "amd64" ] || [ "$ARCH" == "x86_64" ] || [ "$ARCH" == "x86" ]; then
+    FILE_INFO=("https://github.com/etjec4/tuic/releases/download/tuic-server-1.0.0/tuic-server-1.0.0-x86_64-unknown-freebsd web" "https://github.com/eooce/test/releases/download/freebsd/npm npm")
+else
+    echo "Unsupported architecture: $ARCH"
+    exit 1
+fi
+declare -A FILE_MAP
+generate_random_name() {
+    local chars=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890
+    local name=""
+    for i in {1..6}; do
+        name="$name${chars:RANDOM%${#chars}:1}"
     done
-    echo
+    echo "$name"
 }
 
-# Introduction animation
-echo ""
-echo ""
-print_with_delay "Install Tuic-V5 by eooce" 0.1
-echo ""
-echo ""
+download_with_fallback() {
+    local URL=$1
+    local NEW_FILENAME=$2
 
-# Check for and install required packages
-install_packages() {
-    packages="jq curl openssl"
-    install=""
+    curl -L -sS --max-time 3 -o "$NEW_FILENAME" "$URL" &
+    CURL_PID=$!
+    CURL_START_SIZE=$(stat -c%s "$NEW_FILENAME" 2>/dev/null || echo 0)
+    
+    sleep 1
 
-    for pkg in $packages; do
-        if ! command -v $pkg &>/dev/null; then
-            install="$install $pkg"
-        fi
-    done
-
-    if [ -z "$install" ]; then
-        echo -e "\e[1;32mAll packages are already installed\e[0m"
-        return
-    fi
-
-    if command -v apt &>/dev/null; then
-        pm="apt-get install -y -q"
-    elif command -v dnf &>/dev/null; then
-        pm="dnf install -y"
-    elif command -v yum &>/dev/null; then
-        pm="yum install -y"
-    elif command -v apk &>/dev/null; then
-        pm="apk add"
+    CURL_CURRENT_SIZE=$(stat -c%s "$NEW_FILENAME" 2>/dev/null || echo 0)
+    
+    if [ "$CURL_CURRENT_SIZE" -le "$CURL_START_SIZE" ]; then
+        kill $CURL_PID 2>/dev/null
+        wait $CURL_PID 2>/dev/null
+        wget -q -O "$NEW_FILENAME" "$URL"
+        echo -e "\e[1;32mDownloading $NEW_FILENAME by wget\e[0m"
     else
-        echo -e "\e[1;33m暂不支持的系统!\e[0m"
-        exit 1
+        wait $CURL_PID 2>/dev/null
+        echo -e "\e[1;32mDownloading $NEW_FILENAME by curl\e[0m"
     fi
-    $pm $install
 }
 
-# Check if the directory /root/tuic already exists
-if [ -d "/root/tuic" ]; then
-    echo -e "\e[1;32mTuic is already installed\e[0m"
-    echo ""
-    echo ""
-    echo -e "\e[1;32m1: Reinstall\e[0m"
-    echo ""
-    echo -e "\e[1;32m2: Change config\e[0m"
-    echo ""
-    echo -e "\e[1;35m3: Uninstall\e[0m"
-    echo ""
-    read -p $'\033[1;91mEnter your choice: \033[0m' choice
+for entry in "${FILE_INFO[@]}"; do
+    URL=$(echo "$entry" | cut -d ' ' -f 1)
+    RANDOM_NAME=$(generate_random_name)
+    NEW_FILENAME="$DOWNLOAD_DIR/$RANDOM_NAME"
+    
+    download_with_fallback "$URL" "$NEW_FILENAME"
+    
+    chmod +x "$NEW_FILENAME"
+    FILE_MAP[$(echo "$entry" | cut -d ' ' -f 2)]="$NEW_FILENAME"
+done
+wait
 
-    case $choice in
-        1)
-            rm -rf /root/tuic
-            systemctl stop tuic
-            pkill -f tuic-server
-            systemctl disable tuic > /dev/null 2>&1
-            rm /etc/systemd/system/tuic.service
-            ;;
-        2)   read -p $'\033[1;35mEnter a UUID (or press enter for a random UUID): \033[0m' new_uuid
-            [ -z "$new_uuid" ] && new_uuid=$(openssl rand -hex 16 | awk '{print substr($0,1,8)"-"substr($0,9,4)"-"substr($0,13,4)"-"substr($0,17,4)"-"substr($0,21,12)}')
-            password=$(jq -r '.users[]' /root/tuic/config.json)
-            jq ".users = {\"""$new_uuid\":\"$password\"}" /root/tuic/config.json > temp.json && mv temp.json /root/tuic/config.json
-            echo -e "\e[1;32mYour new UUID:$new_uuid\e[0m"
-            
-            read -p $'\033[1;35mEnter a new port (or press enter for a random port): \033[0m' new_port
-            [ -z "$new_port" ] && new_port=$(shuf -i 10000-65000 -n 1)
-            sed -i "s/\"\[::\]:[0-9]\+\"/\"\[::\]:$new_port\"/" /root/tuic/config.json
-            echo -e "\e[1;32mYour new PORT:$new_port\e[0m"
-            systemctl daemon-reload
-            systemctl restart tuic
-            public_ip=$(curl -s https://api.ipify.org)
-            isp=$(curl -s https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18}' | sed -e 's/ /_/g')
-            echo -e "\e[1;33m\nV2rayN、NekoBox\e[0m"
-            echo -e "\e[1;32mtuic://$new_uuid:$password@$public_ip:$new_port?congestion_control=bbr&alpn=h3&sni=www.bing.com&udp_relay_mode=native&allow_insecure=1#$isp\e[0m"
-            echo ""
-            exit 0
-            ;;
-        3)
-            rm -rf /root/tuic
-            systemctl stop tuic
-            pkill -f tuic-server
-            systemctl disable tuic > /dev/null 2>&1
-            rm /etc/systemd/system/tuic.service
-            rm tuic.sh
-            echo -e "\e[1;32mTuic uninstalled successfully!\e[0m"
-            echo ""
-            exit 0
-            ;;
-        *)
-            echo -e "\e[1;33mExit Installation\e[0m"
-            rm tuic.sh
-            exit 0
-            ;;
-    esac
-fi
+# Generate cert
+openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) -keyout $WORKDIR/server.key -out $WORKDIR/server.crt -subj "/CN=bing.com" -days 36500
 
-# Install packages if is not already installed
-install_packages
-echo -e "\e[1;32mInstallation is in progress, please wait...\e[0m"
-
-# Detect the architecture of the server
-detect_arch() {
-    local arch=$(uname -m)
-    case $arch in
-        x86_64)
-            echo "x86_64-unknown-linux-gnu"
-            ;;
-        i686)
-            echo "i686-unknown-linux-gnu"
-            ;;
-        armv7l)
-            echo "armv7-unknown-linux-gnueabi"
-            ;;
-        aarch64)
-            echo "aarch64-unknown-linux-gnu"
-            ;;
-        *)
-            echo -e "\e[1;33mUnsupported architecture: $arch\e[0m"
-            exit 1
-            ;;
-    esac
-}
-
-server_arch=$(detect_arch)
-latest_release_version=$(curl -s "https://api.github.com/repos/etjec4/tuic/releases/latest" | jq -r ".tag_name")
-
-# Build the download URL based on the latest release version and detected architecture
-download_url="https://github.com/etjec4/tuic/releases/download/$latest_release_version/$latest_release_version-$server_arch"
-
-# Download the binary with verbose output
-mkdir -p /root/tuic
-cd /root/tuic
-wget -O tuic-server -q "$download_url"
-if [[ $? -ne 0 ]]; then
-    echo "Failed to download the tuic binary"
-    exit 1
-fi
-chmod 755 tuic-server
-
-# Create self-signed certs
-openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) -keyout /root/tuic/server.key -out /root/tuic/server.crt -subj "/CN=bing.com" -days 36500
-
-# Prompt user for port and password
-echo ""
-read -p $'\033[1;35mEnter a port between 10000 to 65000(or press enter for a random port): \033[0m' port
-echo ""
-[ -z "$port" ] && port=$((RANDOM % 55001 + 10000))
-echo -e "\e[1;32mTuic port:$port\e[0m"
-
-read -p $'\033[1;35mEnter a password (or press enter for a random password): \033[0m' password
-[ -z "$password" ] && password=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | fold -w 8 | head -n 1)
-echo -e "\e[1;32mTuic password:$password\e[0m"
-
-# Generate UUID
-UUID=$(openssl rand -hex 16 | awk '{print substr($0,1,8)"-"substr($0,9,4)"-"substr($0,13,4)"-"substr($0,17,4)"-"substr($0,21,12)}')
-echo -e "\e[1;32mTuic UUID:$UUID\e[0m"
-
-# Ensure UUID generation is successful
-if [ -z "$UUID" ]; then
-    echo -e "\e[1;91mError: Failed to generate UUID\e[0m"
-    exit 1
-fi
-
-# Create config.json
+# Generate configuration file
 cat > config.json <<EOL
 {
-  "server": "[::]:$port",
+  "server": "[::]:$PORT",
   "users": {
-    "$UUID": "$password"
+    "$UUID": "$PASSWORD"
   },
-  "certificate": "/root/tuic/server.crt",
-  "private_key": "/root/tuic/server.key",
+  "certificate": "$WORKDIR/server.crt",
+  "private_key": "$WORKDIR/server.key",
   "congestion_control": "bbr",
   "alpn": ["h3", "spdy/3.1"],
   "udp_relay_ipv6": true,
@@ -199,40 +98,85 @@ cat > config.json <<EOL
 }
 EOL
 
-# Create a systemd service for tuic
-cat > /etc/systemd/system/tuic.service <<EOL
-[Unit]
-Description=tuic service
-Documentation=TUIC v5
-After=network.target nss-lookup.target
+# running files
+run() {
+  if [ -e "$(basename ${FILE_MAP[npm]})" ]; then
+    tlsPorts=("443" "8443" "2096" "2087" "2083" "2053")
+    if [[ "${tlsPorts[*]}" =~ "${NEZHA_PORT}" ]]; then
+      NEZHA_TLS="--tls"
+    else
+      NEZHA_TLS=""
+    fi
+    if [ -n "$NEZHA_SERVER" ] && [ -n "$NEZHA_PORT" ] && [ -n "$NEZHA_KEY" ]; then
+      export TMPDIR=$(pwd)
+      nohup ./"$(basename ${FILE_MAP[npm]})" -s ${NEZHA_SERVER}:${NEZHA_PORT} -p ${NEZHA_KEY} ${NEZHA_TLS} >/dev/null 2>&1 &
+      sleep 1
+      pgrep -x "$(basename ${FILE_MAP[npm]})" > /dev/null && echo -e "\e[1;32m$(basename ${FILE_MAP[npm]}) is running\e[0m" || { echo -e "\e[1;35m$(basename ${FILE_MAP[npm]}) is not running, restarting...\e[0m"; pkill -f "$(basename ${FILE_MAP[npm]})" && nohup ./"$(basename ${FILE_MAP[npm]})" -s ${NEZHA_SERVER}:${NEZHA_PORT} -p ${NEZHA_KEY} ${NEZHA_TLS} >/dev/null 2>&1 & sleep 2; echo -e "\e[1;32m"$(basename ${FILE_MAP[npm]})" restarted\e[0m"; }
+    else
+      echo -e "\e[1;35mNEZHA variable is empty, skipping running\e[0m"
+    fi
+  fi
 
-[Service]
-User=root
-WorkingDirectory=/root/tuic
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
-ExecStart=/root/tuic/tuic-server -c /root/tuic/config.json
-Restart=on-failure
-RestartSec=10
-LimitNOFILE=infinity
+  if [ -e "$(basename ${FILE_MAP[web]})" ]; then
+    nohup ./"$(basename ${FILE_MAP[web]})" -c config.json >/dev/null 2>&1 &
+    sleep 1
+    pgrep -x "$(basename ${FILE_MAP[web]})" > /dev/null && echo -e "\e[1;32m$(basename ${FILE_MAP[web]}) is running\e[0m" || { echo -e "\e[1;35m$(basename ${FILE_MAP[web]}) is not running, restarting...\e[0m"; pkill -f "$(basename ${FILE_MAP[web]})" && nohup ./"$(basename ${FILE_MAP[web]})" -c config.json >/dev/null 2>&1 & sleep 2; echo -e "\e[1;32m$(basename ${FILE_MAP[web]}) restarted\e[0m"; }
+  fi
+rm -rf "$(basename ${FILE_MAP[web]})" "$(basename ${FILE_MAP[npm]})"
+}
+run
 
-[Install]
-WantedBy=multi-user.target
-EOL
+get_ip() {
+  IP_LIST=($(devil vhost list | awk '/^[0-9]+/ {print $1}'))
+  API_URL="https://status.eooce.com/api"
+  IP=""
+  THIRD_IP=${IP_LIST[2]}
+  RESPONSE=$(curl -s --max-time 2 "${API_URL}/${THIRD_IP}")
+  if [[ $(echo "$RESPONSE" | jq -r '.status') == "Available" ]]; then
+      IP=$THIRD_IP
+  else
+      FIRST_IP=${IP_LIST[0]}
+      RESPONSE=$(curl -s --max-time 2 "${API_URL}/${FIRST_IP}")
+      
+      if [[ $(echo "$RESPONSE" | jq -r '.status') == "Available" ]]; then
+          IP=$FIRST_IP
+      else
+          IP=${IP_LIST[1]}
+      fi
+  fi
+echo "$IP"
+}
 
-# Reload systemd, enable and start tuic
-systemctl daemon-reload
-systemctl start tuic
-systemctl enable tuic > /dev/null 2>&1
-systemctl restart tuic
+HOST_IP=$(get_ip)
+echo -e "\e[1;32m本机IP: $HOST_IP\033[0m"
 
-# Print the v2rayN config and nekoray/nekobox URL
-public_ip=$(curl -s https://api.ipify.org)
+ISP=$(curl -s --max-time 2 https://speed.cloudflare.com/meta | awk -F\" '{print $26}' | sed -e 's/ /_/g' || echo "0")
+get_name() { if [ "$HOSTNAME" = "s1.ct8.pl" ]; then SERVER="CT8"; else SERVER=$(echo "$HOSTNAME" | cut -d '.' -f 1); fi; echo "$SERVER"; }
+NAME=$ISP-$(get_name)-tuic
 
-# get ipinfo
-isp=$(curl -s https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18}' | sed -e 's/ /_/g')
-
-# nekoray/nekobox URL
-echo -e "\e[1;33m\nV2rayN、NekoBox\e[0m"
-echo -e "\e[1;32mtuic://$UUID:$password@$public_ip:$port?congestion_control=bbr&alpn=h3&sni=www.bing.com&udp_relay_mode=native&allow_insecure=1#$isp\e[0m"
-echo ""
+echo -e "\e[1;32mTuic安装成功\033[0m\n"
+echo -e "\e[1;33mV2rayN 或 Nekobox，跳过证书验证需设置为true\033[0m\n"
+echo -e "\e[1;32mtuic://$UUID:$PASSWORD@$HOST_IP:$PORT?congestion_control=bbr&alpn=h3&sni=www.bing.com&udp_relay_mode=native&allow_insecure=1#$NAME\e[0m\n"
+echo -e "\e[1;33mClash\033[0m"
+cat << EOF
+- name: $NAME
+  type: tuic
+  server: $HOST_IP
+  port: $PORT                                                          
+  uuid: $UUID
+  password: $PASSWORD
+  alpn: [h3]
+  disable-sni: true
+  reduce-rtt: true
+  udp-relay-mode: native
+  congestion-controller: bbr
+  sni: www.bing.com                                
+  skip-cert-verify: true
+EOF
+rm -rf config.json fake_useragent_0.2.0.json
+echo -e "\n\e[1;32mRuning done!\033[0m"
+echo -e "\e[1;35m脚本地址：https://github.com/eooce/scripts\e[0m"
+echo -e "\e[1;35m反馈论坛：https://bbs.vps8.me\e[0m"
+echo -e "\e[1;35mTG反馈群组：https://t.me/vps888\e[0m"
+echo -e "\e[1;35m转载请著名出处，请勿滥用\e[0m\n"
+exit 0
